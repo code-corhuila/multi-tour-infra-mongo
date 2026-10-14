@@ -1,0 +1,58 @@
+# The single MongoDB instance of one environment (Annex J, J.3.1, J.7; Annex B, rule 6). Select the
+# environment with its variables file, which also names the project and so the container and volumes:
+#   docker compose --env-file env/dev.env up -d --wait mongo      (or scripts/up.sh dev)
+# A single-node replica set with authentication, so transactions work and every service has its own user.
+services:
+  mongo:
+    # Exact version: a moving tag would change the database under the team without a commit.
+    image: mongo:8.0.32
+    restart: unless-stopped
+    # Generates the replica-set key on the first start, then starts mongod with it.
+    entrypoint: ["sh", "/mongo/keyfile.sh"]
+    command: ["mongod", "--replSet", "rs0", "--keyFile", "/keys/replica.key", "--bind_ip_all"]
+    # No ports on purpose: only services on the platform network reach the database. A developer
+    # opens mongosh with `docker compose exec` (see the README).
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:?MONGO_INITDB_ROOT_USERNAME is required, set it in env/<environment>.env}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:?MONGO_INITDB_ROOT_PASSWORD is required, set it in env/<environment>.env}
+      # Password of the user created by mongo/init/01-instance.js
+      IDENTITY_AUDIT_APP_PASSWORD: ${IDENTITY_AUDIT_APP_PASSWORD:?IDENTITY_AUDIT_APP_PASSWORD is required, set it in env/<environment>.env}
+    volumes:
+      - mongo-data:/data/db
+      - mongo-keys:/keys
+      - ./mongo/keyfile.sh:/mongo/keyfile.sh:ro
+      # The image runs these scripts only when the volume is empty (Annex J, J.5.2)
+      - ./mongo/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Healthy only as the primary of a replica set: the temporary server of the first start is
+      # standalone (no setName), so the check stays red until the init scripts have finished.
+      # Not yet initiated: it initiates the set once and reports unhealthy until the next probe.
+      test:
+        - CMD
+        - mongosh
+        - --quiet
+        - -u
+        - ${MONGO_INITDB_ROOT_USERNAME}
+        - -p
+        - ${MONGO_INITDB_ROOT_PASSWORD}
+        - --authenticationDatabase
+        - admin
+        - --eval
+        - |
+          const h = db.hello();
+          if (h.isWritablePrimary && h.setName) quit(0);
+          if (!h.setName) { try { rs.status() } catch (e) { rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'mongo:27017' }] }) } }
+          quit(1)
+      interval: 5s
+      timeout: 10s
+      retries: 12
+      start_period: 15s
+    networks: [platform]
+
+volumes:
+  mongo-data:
+  mongo-keys:
+
+networks:
+  platform:
+    external: true
