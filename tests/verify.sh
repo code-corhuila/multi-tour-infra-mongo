@@ -1,5 +1,5 @@
 #!/bin/sh
-# The V checks of the spec (RN-INF-11 to RN-INF-16) against a throwaway instance. CI and a developer
+# The V checks of the spec (RN-INF-11 to RN-INF-16) and the I checks of 001 (RN-MGO-01, -02) against a throwaway instance. CI and a developer
 # run this same file; Docker is the only requirement.
 #
 # It never touches dev, qa or main: it starts the project multi-tour-ci from a variables file built
@@ -25,10 +25,16 @@ password() { printf '%s-%s' "$BASE" "$1"; }
 
 # -p wins over the file, so no variable can make this script address another environment
 dc() { docker compose -p "$PROJECT" --env-file "$ENVF_ARG" "$@"; }
+# the runners write to a folder of this run only, never to backups/ of the repository
+BACKUP_HOST="$TMP/backup"
+BACKUP_ARG="$BACKUP_HOST"
+command -v cygpath >/dev/null 2>&1 && BACKUP_ARG=$(cygpath -m "$BACKUP_HOST")
+dcb() { BACKUP_DIR="$BACKUP_ARG" dc --profile tooling "$@"; }
 
 cleanup() {
   dc down -v --remove-orphans >/dev/null 2>&1 || true
-  rm -rf "$TMP"
+  # the runners write as root inside the container; a Linux host needs docker to remove that folder
+  rm -rf "$TMP" 2>/dev/null || true
 }
 trap cleanup EXIT
 trap 'exit 1' INT TERM
@@ -117,6 +123,37 @@ V_init_runs_twice_without_error() {
   cmp -s "$TMP/before.txt" "$TMP/after.txt" || { echo "the second run changed the users"; return 1; }
 }
 
+service_block() { # name: the resolved block of one service with every profile active; only searched, never printed
+  dc --profile tooling config 2>/dev/null | awk -v s="  $1:" '$0 == s {on=1; next} on && /^  [^ ]/ {on=0} on && /^[^ ]/ {on=0} on'
+}
+
+I_backup_runner_is_tooling_and_waits_for_the_healthy_instance() {
+  for svc in mongo-backup mongo-restore; do
+    block=$(service_block "$svc")
+    [ -n "$block" ] || { echo "$svc is not defined"; return 1; }
+    printf '%s\n' "$block" | grep -Eq '^[[:space:]]+image: mongo:8\.0\.[0-9]+$' || { echo "$svc image is not pinned to an exact 8.0 version"; return 1; }
+    printf '%s\n' "$block" | grep -A1 -E '^[[:space:]]+profiles:' | grep -Eq -- '- tooling$' || { echo "$svc has no profile tooling"; return 1; }
+    printf '%s\n' "$block" | grep -A2 -E '^[[:space:]]+depends_on:' | grep -A1 -E '^[[:space:]]+mongo:$' | grep -Eq 'condition: service_healthy' || { echo "$svc does not wait for mongo service_healthy"; return 1; }
+  done
+  # up without a profile must start only the instance
+  dc config --services 2>/dev/null | grep -Eq '^mongo-(backup|restore)$' && { echo "a runner starts with up"; return 1; }
+  # the credentials come from the variables file: compose.yml names them, never carries a value
+  grep -E '^[[:space:]]*(MONGO_INITDB_ROOT_USERNAME|MONGO_INITDB_ROOT_PASSWORD):' compose.yml | grep -vq '\${' && { echo "compose.yml carries a literal credential"; return 1; }
+  return 0
+}
+
+I_dump_and_restore_with_the_oplog_bring_back_a_document() {
+  [ -n "$(service_block mongo-backup)" ] || { echo "mongo-backup is not defined"; return 1; }
+  mongo_admin "db.getSiblingDB('verify').backup.insertOne({v: 'before'})" >/dev/null || { echo "could not write the document"; return 1; }
+  out=$(dcb run --rm mongo-backup 2>&1) || { echo "the backup failed:"; printf '%s\n' "$out" | tail -n 5; return 1; }
+  [ -s "$BACKUP_HOST/mongo.archive" ] || { echo "no archive was written in the backup folder"; return 1; }
+  printf '%s\n' "$out" | grep -q 'writing captured oplog' || { echo "the dump did not capture the oplog"; return 1; }
+  mongo_admin "db.getSiblingDB('verify').backup.deleteMany({})" >/dev/null || { echo "could not delete the document"; return 1; }
+  out=$(dcb run --rm mongo-restore 2>&1) || { echo "the restore failed:"; printf '%s\n' "$out" | tail -n 5; return 1; }
+  printf '%s\n' "$out" | grep -q 'replaying oplog' || { echo "the restore did not replay the oplog"; return 1; }
+  [ "$(mongo_admin "db.getSiblingDB('verify').backup.countDocuments({v: 'before'})")" = 1 ] || { echo "the document is not back after the restore"; return 1; }
+}
+
 # ---- setup: a clean throwaway project, then one instance
 build_env
 dc down -v --remove-orphans >/dev/null 2>&1 || true
@@ -131,6 +168,8 @@ run "V·init_runs_only_on_empty_volume" V_init_runs_only_on_empty_volume
 run "V·no_real_env_file_versioned" V_no_real_env_file_versioned
 run "V·app_user_reaches_only_its_database" V_app_user_reaches_only_its_database
 run "V·init_runs_twice_without_error" V_init_runs_twice_without_error
+run "I·backup_runner_is_tooling_and_waits_for_the_healthy_instance" I_backup_runner_is_tooling_and_waits_for_the_healthy_instance
+run "I·dump_and_restore_with_the_oplog_bring_back_a_document" I_dump_and_restore_with_the_oplog_bring_back_a_document
 
 [ "$fail" = 0 ] && echo "ALL CHECKS PASSED" || echo "SOME CHECKS FAILED"
 exit "$fail"
