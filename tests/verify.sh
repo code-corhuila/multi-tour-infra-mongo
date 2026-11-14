@@ -23,18 +23,28 @@ fail=0
 # One distinct password per user from a random base that lives only in this process
 password() { printf '%s-%s' "$BASE" "$1"; }
 
+# On a shared Docker host the network platform also holds the instance of dev under the name mongo:
+# this project gets a network of its own, so no service of dev reaches the throwaway instance
+NETWORK="$PROJECT-platform"
+ISOLATE="$TMP/isolate.yml"
+printf 'networks:\n  platform:\n    name: %s\n    external: true\n' "$NETWORK" > "$ISOLATE"
+ISOLATE_ARG="$ISOLATE"
+command -v cygpath >/dev/null 2>&1 && ISOLATE_ARG=$(cygpath -m "$ISOLATE")
+
 # -p wins over the file, so no variable can make this script address another environment
-dc() { docker compose -p "$PROJECT" --env-file "$ENVF_ARG" "$@"; }
+dc() { docker compose -p "$PROJECT" -f compose.yml -f "$ISOLATE_ARG" --env-file "$ENVF_ARG" "$@"; }
 # the runners write to a folder of this run only, never to backups/ of the repository
 BACKUP_HOST="$TMP/backup"
+# created here, not by Docker, so this user can remove the files the runner writes as root
+mkdir -p "$BACKUP_HOST"
 BACKUP_ARG="$BACKUP_HOST"
 command -v cygpath >/dev/null 2>&1 && BACKUP_ARG=$(cygpath -m "$BACKUP_HOST")
 dcb() { BACKUP_DIR="$BACKUP_ARG" dc --profile tooling "$@"; }
 
 cleanup() {
   dc down -v --remove-orphans >/dev/null 2>&1 || true
-  # the runners write as root inside the container; a Linux host needs docker to remove that folder
-  rm -rf "$TMP" 2>/dev/null || true
+  docker network rm "$NETWORK" >/dev/null 2>&1 || true
+  rm -rf "$TMP"
 }
 trap cleanup EXIT
 trap 'exit 1' INT TERM
@@ -157,7 +167,7 @@ I_dump_and_restore_with_the_oplog_bring_back_a_document() {
 # ---- setup: a clean throwaway project, then one instance
 build_env
 dc down -v --remove-orphans >/dev/null 2>&1 || true
-docker network inspect platform >/dev/null 2>&1 || docker network create platform >/dev/null
+docker network inspect "$NETWORK" >/dev/null 2>&1 || docker network create "$NETWORK" >/dev/null
 ADMIN=$(value MONGO_INITDB_ROOT_USERNAME)
 STARTED=0
 dc up -d --wait --wait-timeout 120 mongo >"$TMP/up.log" 2>&1 && STARTED=1
