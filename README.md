@@ -45,21 +45,37 @@ inside the container:
 docker compose --env-file env/dev.env exec mongo mongosh -u multitour_admin -p --authenticationDatabase admin
 ```
 
+## Backup and restore
+
+Two runners of profile `tooling`, so `up` never starts them: `mongo-backup` writes `mongodump
+--oplog` of the whole instance to `${BACKUP_DIR}/mongo.archive`, and `mongo-restore` brings the
+instance back to it with `--drop --oplogReplay`. Both wait for the instance `service_healthy`, use
+the administrator of `env/<environment>.env` and reach the instance only on the project network.
+The dated folders, the 30 days and the confirmation in `qa` and `main` live in `scripts/backup.sh`
+and `scripts/restore.sh` of `multi-tour-infra-postgres`. By hand:
+
+```sh
+BACKUP_DIR=./backups/2026-11-14 docker compose --env-file env/dev.env --profile tooling run --rm mongo-backup
+```
+
+`backups/` is ignored by git.
+
 ## How to test it
 
 ```sh
 sh tests/verify.sh
 ```
 
-Needs Docker. It starts a throw-away project, runs the six checks of the spec (one container per
+Needs Docker. It starts a throw-away project, runs the six checks of the piece spec (one container per
 environment, the replica set is primary, the init script only on an empty volume, no real `.env`
 versioned, the application user reaches only its database, the init script twice without changes)
-and removes it. The CI runs the same script on every pull request to `develop` and `qa`.
+and the two of the backup (the runners are tooling and wait for the instance; a document deleted
+after a backup comes back after the restore), and removes it. The CI runs the same script on every pull request to `develop` and `qa`.
 
 ## What is missing
 
-The backup and restore of the instance (AC4 of `code-corhuila/multi-tour-docs#200`), which comes
-with the story spec.
+Nothing of AC4 of `code-corhuila/multi-tour-docs#200`; the scheduler, encryption and an off-host
+store belong to the environment that operates the platform (ADR-004 D9).
 
 ## Branching
 
