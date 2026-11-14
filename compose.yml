@@ -47,7 +47,51 @@ services:
       timeout: 10s
       retries: 12
       start_period: 15s
-    networks: [platform]
+    # platform for the services of every repository; default, private to this project, for the runners
+    networks: [platform, default]
+
+  # Backup and restore runners (ADR-004 D9). Profile tooling: `up` never starts them; the scripts of
+  # multi-tour-infra-postgres run them with `run --rm` and give the dated folder in BACKUP_DIR.
+  # The whole instance with --oplog, so the copy stays consistent while the audit writes.
+  mongo-backup:
+    image: mongo:8.0.32
+    profiles: [tooling]
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:?MONGO_INITDB_ROOT_USERNAME is required, set it in env/<environment>.env}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:?MONGO_INITDB_ROOT_PASSWORD is required, set it in env/<environment>.env}
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        mongodump --host mongo:27017 --username "$$MONGO_INITDB_ROOT_USERNAME"
+        --password "$$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin
+        --oplog --gzip --archive=/backup/mongo.archive
+    volumes:
+      - ${BACKUP_DIR:-./backups}:/backup
+    # Only the project network: on platform, "mongo" can also be the instance of another environment
+    networks: [default]
+
+  # Brings the instance back to the backup: drops each collection it restores, then replays the oplog.
+  mongo-restore:
+    image: mongo:8.0.32
+    profiles: [tooling]
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:?MONGO_INITDB_ROOT_USERNAME is required, set it in env/<environment>.env}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:?MONGO_INITDB_ROOT_PASSWORD is required, set it in env/<environment>.env}
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        mongorestore --host mongo:27017 --username "$$MONGO_INITDB_ROOT_USERNAME"
+        --password "$$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin
+        --drop --oplogReplay --gzip --archive=/backup/mongo.archive
+    volumes:
+      - ${BACKUP_DIR:-./backups}:/backup:ro
+    networks: [default]
 
 volumes:
   mongo-data:
