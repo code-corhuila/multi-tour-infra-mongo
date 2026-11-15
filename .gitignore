@@ -5,3 +5,5 @@ env/*.env
 !env/*.env.example
 keys/
 *.pem
+# Backups written by the runners when BACKUP_DIR is not given: data, never versioned
+backups/
